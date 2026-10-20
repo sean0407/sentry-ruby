@@ -61,7 +61,8 @@ module Sentry
       #
       # @param job [Object] the job, passed as-is to each extension
       # @return [Extension, nil] the earliest registered extension that handles
-      #   the job, or nil if none does
+      #   the job, or nil if none does. With a default extension, returns that
+      #   default when none handles the job, or a Composite combining both
       def for(job)
         extension = @registry ? @registry.for(job) : @extensions.find { |candidate| handles?(candidate, job) }
         return extension unless @default_extension

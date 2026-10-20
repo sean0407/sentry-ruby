@@ -7,9 +7,10 @@ module Sentry
     #
     # A backend gem subclasses this class, receives everything the extension
     # depends on (configuration, collaborators) through its constructor, and
-    # registers one instance with {Sentry.register_job_extension}. Sentry never
-    # instantiates extensions itself and treats jobs as opaque objects: only the
-    # extension interprets the job it is given.
+    # registers one instance with {Sentry.register_job_extension}. Sentry treats
+    # jobs as opaque objects: only the extension interprets the job it is given.
+    # Registries with a default extension instantiate a Composite to combine
+    # the registered extension with that default.
     #
     # @example Defining and registering an extension
     #   class MyBackend::SentryJobExtension < Sentry::JobExtensions::Extension
@@ -60,8 +61,9 @@ module Sentry
 
       # @!group Hooks
       #
-      # Hooks are called by job integrations through {Registry#call}, only on
-      # the extension that handles the job. Each hook maps its input to data
+      # Hooks are called by job integrations through {Registry#call}. A Composite
+      # calls both the default extension and the extension that handles the job,
+      # then merges their results. Each hook maps its input to data
       # and must not mutate the objects it is given; the job integration
       # applies the returned data. Override only the hooks the backend can
       # supply: the defaults return the fallback result, which makes the
