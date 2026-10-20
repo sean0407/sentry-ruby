@@ -52,17 +52,26 @@ RSpec.describe "ActiveJob jobs on Sidekiq" do
     }.merge(attributes.transform_keys(&:to_s))
   end
 
-  def skip_sidekiq_adapter(skipped)
+  def list_sidekiq_adapter_as_skippable(skipped)
     adapters = Sentry.configuration.rails.skippable_job_adapters
     skipped ? adapters |= [sidekiq_adapter] : adapters -= [sidekiq_adapter]
     Sentry.configuration.rails.skippable_job_adapters = adapters
   end
 
-  def process(message, adapter_skipped:)
-    skip_sidekiq_adapter(adapter_skipped)
+  def skip_sidekiq_adapter(skipped)
+    Sentry.configuration.sidekiq.active_job_integration = :rails unless skipped
+    list_sidekiq_adapter_as_skippable(skipped)
+  end
+
+  def deliver(message)
     transport.events.clear
     process_work(processor, Sidekiq::BasicFetch::UnitOfWork.new("queue:#{message["queue"]}", Sidekiq.dump_json(message)))
     transport.events.dup
+  end
+
+  def process(message, adapter_skipped:)
+    skip_sidekiq_adapter(adapter_skipped)
+    deliver(message)
   end
 
   def consumer_transactions(events)
@@ -693,6 +702,94 @@ RSpec.describe "ActiveJob jobs on Sidekiq" do
       transaction = consumer_transactions(transport.events).first
       expect(transaction.transaction).to eq("InlineParityJob")
       expect(transaction.contexts.dig(:trace, :origin)).to eq("auto.queue.active_job")
+    end
+  end
+
+  context "after Sentry.init runs again without the ActiveJob hand-off" do
+    before { perform_basic_setup { |config| config.traces_sample_rate = 1.0 } }
+
+    it "should preserve Rails identity and serialized trace propagation when the job succeeds" do
+      parent = Sentry.start_transaction(name: "enqueue", op: "test")
+      Sentry.get_current_scope.set_span(parent)
+      message = sidekiq_message(parity_job)
+      parent.finish
+      Sentry.get_current_scope.clear
+
+      events = deliver(message)
+      transactions = consumer_transactions(events)
+      rails_transaction = transactions.find { |event| event.contexts.key?(:active_job) }
+
+      aggregate_failures do
+        expect(transactions.size).to eq(2)
+        expect(rails_transaction.transaction).to eq("ParityJob")
+        expect(rails_transaction.contexts.dig(:trace, :origin)).to eq("auto.queue.active_job")
+        expect(message["args"].first.dig("_sentry", "trace_propagation_headers", "sentry-trace"))
+          .to eq("#{parent.trace_id}-#{parent.span_id}-1")
+        expect(rails_transaction.contexts.dig(:trace, :trace_id)).to eq(parent.trace_id)
+      end
+    end
+  end
+
+  context "after Sentry.init runs again before a job fails" do
+    before { perform_basic_setup { |config| config.traces_sample_rate = 1.0 } }
+
+    it "should preserve the Rails error mechanism and transaction identity when the job fails" do
+      failing_job = stub_const("ReinitializedFailingJob", Class.new(ActiveJob::Base) do
+        self.queue_adapter = :sidekiq
+
+        def perform
+          raise "job failed"
+        end
+      end)
+
+      events = deliver(sidekiq_message(failing_job))
+      rails_transaction = consumer_transactions(events).find { |event| event.contexts.key?(:active_job) }
+      error = events.grep(Sentry::ErrorEvent).find { |event| event.contexts.key?(:active_job) }
+
+      aggregate_failures do
+        expect(rails_transaction.transaction).to eq("ReinitializedFailingJob")
+        expect(rails_transaction.contexts.dig(:trace, :origin)).to eq("auto.queue.active_job")
+        expect(error.transaction).to eq("ReinitializedFailingJob")
+        expect(error.exception.values.first.mechanism.type).to eq("rails")
+        expect(error.contexts.dig(:trace, :span_id)).to eq(rails_transaction.contexts.dig(:trace, :span_id))
+      end
+    end
+  end
+
+  context "with config.sidekiq.active_job_integration" do
+    def sidekiq_transaction(events)
+      consumer_transactions(events).find { |transaction| transaction.contexts.key?(:sidekiq) }
+    end
+
+    it "keeps reporting ActiveJob jobs through sentry-sidekiq by default when the adapter is not skippable" do
+      list_sidekiq_adapter_as_skippable(false)
+
+      transaction = sidekiq_transaction(deliver(sidekiq_message(parity_job)))
+
+      expect(transaction.transaction).to eq("Sidekiq/ParityJob")
+      expect(transaction.contexts).not_to have_key(:active_job)
+    end
+
+    it "keeps reporting ActiveJob jobs through sentry-sidekiq when set to :rails but the adapter is skippable" do
+      Sentry.configuration.sidekiq.active_job_integration = :rails
+      list_sidekiq_adapter_as_skippable(true)
+
+      transaction = sidekiq_transaction(deliver(sidekiq_message(parity_job)))
+
+      expect(transaction.transaction).to eq("Sidekiq/ParityJob")
+      expect(transaction.contexts).not_to have_key(:active_job)
+    end
+
+    it "hands ActiveJob jobs to sentry-rails when set to :rails in Sentry.init" do
+      make_basic_app do |config|
+        config.traces_sample_rate = 1.0
+        config.sidekiq.active_job_integration = :rails
+      end
+
+      transaction = sidekiq_transaction(deliver(sidekiq_message(parity_job)))
+
+      expect(transaction.transaction).to eq("Sidekiq/ParityJob")
+      expect(transaction.contexts[:active_job]).to include(job_class: "ParityJob")
     end
   end
 end

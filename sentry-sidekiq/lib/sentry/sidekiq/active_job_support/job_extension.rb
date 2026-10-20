@@ -8,18 +8,18 @@ module Sentry
         SIDEKIQ_JOB_KEY = "_sentry_sidekiq_job"
 
         def handles?(job)
-          super || active_job?(job)
+          super || handles_active_job?(job)
         end
 
         def scope_data(job:)
-          return super unless active_job?(job)
+          return super unless handles_active_job?(job)
 
           sidekiq_job = handed_over_sidekiq_job(job)
           sidekiq_job ? super(job: sidekiq_job) : {}
         end
 
         def messaging_data(job:)
-          return super unless active_job?(job)
+          return super unless handles_active_job?(job)
 
           sidekiq_job = handed_over_sidekiq_job(job)
           return {} unless sidekiq_job
@@ -28,7 +28,7 @@ module Sentry
         end
 
         def retry_info(job:)
-          return super unless active_job?(job)
+          return super unless handles_active_job?(job)
 
           sidekiq_job = handed_over_sidekiq_job(job)
           super(job: sidekiq_job) if sidekiq_job
@@ -36,29 +36,30 @@ module Sentry
 
         def extract_trace_headers(job:, payload:)
           return super if sidekiq_job?(payload)
+          return unless handles_active_job?(job)
 
           sidekiq_job = sidekiq_job_in(payload)
           super(job: job, payload: sidekiq_job) if sidekiq_job
         end
 
         def transaction_name(job:)
-          active_job?(job) ? "#{self.class::SIDEKIQ_NAME}/#{job.class.name}" : super
+          handles_active_job?(job) ? "#{self.class::SIDEKIQ_NAME}/#{job.class.name}" : super
         end
 
         def span_origin(job:)
-          active_job?(job) ? self.class::SPAN_ORIGIN : super
+          handles_active_job?(job) ? self.class::SPAN_ORIGIN : super
         end
 
         def integration(job:)
-          active_job?(job) ? Sentry::Sidekiq : super
+          handles_active_job?(job) ? Sentry::Sidekiq : super
         end
 
         def report_retried_exception?(job:, exception:)
-          active_job?(job) ? false : super
+          handles_active_job?(job) ? false : super
         end
 
         def performed_by_active_job?(sidekiq_job)
-          !!sidekiq_job["wrapped"] && active_job_owns_adapter?
+          !!sidekiq_job["wrapped"] && active_job_handoff?
         end
 
         def active_job_args(sidekiq_job, scope:)
@@ -75,10 +76,14 @@ module Sentry
 
         private
 
-        def active_job?(job)
+        def handles_active_job?(job)
           return false unless defined?(::ActiveJob::Base) && job.is_a?(::ActiveJob::Base)
 
-          job.class.queue_adapter.class.name == ACTIVE_JOB_ADAPTER
+          job.class.queue_adapter.class.name == ACTIVE_JOB_ADAPTER && active_job_handoff?
+        end
+
+        def active_job_handoff?
+          active_job_owns_adapter? && Sentry.configuration.sidekiq.active_job_integration == :rails
         end
 
         def active_job_owns_adapter?
@@ -89,7 +94,7 @@ module Sentry
         end
 
         def handed_over_sidekiq_job(job)
-          return unless active_job?(job) && job.respond_to?(:_sentry_job_data)
+          return unless handles_active_job?(job) && job.respond_to?(:_sentry_job_data)
 
           sidekiq_job_in(job._sentry_job_data)
         end
