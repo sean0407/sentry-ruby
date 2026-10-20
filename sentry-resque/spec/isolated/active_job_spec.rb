@@ -110,6 +110,34 @@ RSpec.describe "ActiveJob jobs on Resque with sentry-resque loaded", type: :job 
       expect(error_event.sdk[:name]).to eq("sentry.ruby.resque")
     end
 
+    it "should record one failed consumer transaction when a queued job class is removed" do
+      parent_trace_id = nil
+      job = nil
+      within_parent_transaction do |parent|
+        parent_trace_id = parent.trace_id
+        job = successful_job.set(queue: "events").perform_later
+      end
+      hide_const(job.class.name)
+
+      expect { drain }.to raise_error(NameError)
+
+      consumer_transactions = transactions.select { |event| event.contexts.dig(:trace, :op) == "queue.process" }
+      expect(error_events.size).to eq(1)
+      expect(consumer_transactions.size).to eq(1)
+
+      transaction = consumer_transactions.first
+      expect(transaction.transaction).to eq(job.class.name)
+      expect(transaction.contexts.dig(:trace, :status)).to eq("internal_error")
+      expect(transaction.contexts.dig(:trace, :origin)).to eq("auto.queue.resque")
+      expect(transaction.contexts.dig(:trace, :trace_id)).to eq(parent_trace_id)
+      expect(transaction.contexts.dig(:trace, :data)).to include(
+        "messaging.system" => "resque",
+        "messaging.message.id" => job.job_id,
+        "messaging.destination.name" => "events"
+      )
+      expect(error_events.first.contexts.dig(:trace, :span_id)).to eq(transaction.contexts.dig(:trace, :span_id))
+    end
+
     it "records the resque messaging attributes on the consumer transaction" do
       job = successful_job.set(queue: "events").perform_later
       drain
