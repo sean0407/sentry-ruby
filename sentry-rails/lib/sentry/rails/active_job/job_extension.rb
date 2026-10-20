@@ -66,7 +66,13 @@ module Sentry
             provider_job_id: job.provider_job_id,
             locale: job.locale
           }
-          extra[:arguments] = Sentry::Rails::Serializer.serialize(job.arguments) if Sentry.configuration.data_collection.queues
+          if Sentry.configuration.data_collection.queues
+            terms = ::Rails.application.config.filter_parameters.select do |term|
+              term.is_a?(String) || term.is_a?(Symbol) || term.is_a?(Regexp)
+            end
+            collection = Sentry::DataCollection::KeyValueCollection.new(mode: :deny_list, terms: terms)
+            extra[:arguments] = Sentry::Rails::Serializer.serialize(job.arguments, collection)
+          end
 
           {
             contexts: Sentry.configuration.data_collection.queues ? execution_context : {},
