@@ -22,8 +22,11 @@ module Sentry
         def merge_hook(hook, default:, override:)
           case hook
           when :scope_data
-            contexts = override.fetch(:contexts, {}).merge(default[:contexts]) { |_name, backend, generic| backend.merge(generic) }
-            override.merge(contexts: contexts, tags: override.fetch(:tags, {}).merge(default[:tags]))
+            contexts = matching_keys(override.fetch(:contexts, {}), default[:contexts]).merge(default[:contexts]) do |_name, backend, generic|
+              matching_keys(backend, generic).merge(generic)
+            end
+            tags = matching_keys(override.fetch(:tags, {}), default[:tags]).merge(default[:tags])
+            override.merge(contexts: contexts, tags: tags)
           when :messaging_data
             default.merge(override)
           when :publish_messaging_data
@@ -116,6 +119,13 @@ module Sentry
 
         def integration(job:)
           Sentry::Rails
+        end
+
+        private
+
+        def matching_keys(data, reference)
+          keys = reference.keys.to_h { |key| [key.to_s, key] }
+          data.transform_keys { |key| keys.fetch(key.to_s, key) }
         end
       end
     end

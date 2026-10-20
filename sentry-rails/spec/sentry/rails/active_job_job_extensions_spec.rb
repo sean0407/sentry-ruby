@@ -119,6 +119,32 @@ RSpec.describe "Sentry + ActiveJob with a registered job extension", type: :job 
     end
   end
 
+  describe "string-keyed scope data" do
+    it "should preserve backend context fields and Rails identity when an extension uses string keys" do
+      register_extension do
+        def scope_data(job:)
+          {
+            contexts: { "active_job" => { "backend_id" => "delivery-42", "job_id" => "backend-id" } },
+            tags: { "queue" => "backend-queue" }
+          }
+        end
+      end
+
+      event = JSON.parse(JSON.generate(perform_failing_job.to_h))
+      transaction = JSON.parse(JSON.generate(consumer_transaction.to_h))
+
+      [event, transaction].each do |payload|
+        expect(payload.dig("contexts", "active_job")).to include(
+          "backend_id" => "delivery-42",
+          "job_id" => event.dig("extra", "job_id"),
+          "job_class" => failing_job.name,
+          "queue" => "default"
+        )
+        expect(payload.dig("tags", "queue")).to eq("default")
+      end
+    end
+  end
+
   describe "string-keyed error context" do
     it "preserves serialized ActiveJob metadata while adding backend fields" do
       register_extension do
