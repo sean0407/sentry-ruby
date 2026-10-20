@@ -75,7 +75,7 @@ module Sentry
         def messaging_data(job:)
           data = publish_messaging_data(job: job)
           data[:receive_latency] = Sentry::Utils::Latency.milliseconds_since(job.enqueued_at) if job.respond_to?(:enqueued_at)
-          data[:body_size] = body_size(job._sentry_job_data)
+          data[:body_size] = body_size(job._sentry_job_data) if Sentry.get_current_scope.get_span&.sampled
           data.compact
         end
 
