@@ -116,6 +116,45 @@ RSpec.describe Sentry::JobExtensions::Consumer do
       )
     end
 
+    context "when an extension collects latency only for sampled deliveries" do
+      let(:job) { Struct.new(:id, :queue, :enqueued_at).new("job-1", "critical", Time.now - 5) }
+      let(:sampling_consumer) do
+        consumer(
+          messaging_data: lambda do |job:|
+            data = { system: "backend", message_id: job.id, destination: job.queue }
+            data[:receive_latency] = (Time.now - job.enqueued_at) * 1_000 if Sentry.get_current_scope.get_span&.sampled
+            data
+          end
+        )
+      end
+
+      it "records latency for a sampled delivery when the caller is unsampled" do
+        scope.set_span(Sentry.start_transaction(name: "worker", op: "worker", sampled: false))
+
+        event = finished_transaction(sampling_consumer, trace_headers: foreign_trace_headers)
+
+        expect(event.contexts.dig(:trace, :data)).to include(
+          "messaging.message.receive.latency" => a_kind_of(Numeric)
+        )
+      end
+
+      it "omits latency from an unsampled delivery's error when the caller is sampled" do
+        scope.set_span(Sentry.start_transaction(name: "worker", op: "worker", sampled: true))
+        headers = { "sentry-trace" => "#{foreign_trace_id}-#{"b" * 16}-0" }
+        transaction = start_transaction(sampling_consumer, trace_headers: headers)
+
+        event = capture(sampling_consumer)
+        sampling_consumer.finish_transaction(transaction, 500)
+
+        expect(event.contexts.dig(:trace, :data)).to include(
+          "messaging.system" => "backend",
+          "messaging.message.id" => job.id,
+          "messaging.destination.name" => job.queue
+        )
+        expect(event.contexts.dig(:trace, :data)).not_to have_key("messaging.message.receive.latency")
+      end
+    end
+
     it "lets the extension's messaging data win over the caller's and fills the rest from non-nil caller values" do
       partial_consumer = consumer(messaging_data: ->(job:) { { system: "backend", message_id: job.id } })
 

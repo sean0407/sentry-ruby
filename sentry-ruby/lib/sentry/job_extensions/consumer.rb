@@ -55,11 +55,11 @@ module Sentry
         end
         return unless transaction
 
+        scope.set_span(transaction)
         set_messaging_data(transaction, resolve(messaging_data).reject { |_key, value| value.nil? })
         set_messaging_data(transaction, registry.call(extension, :messaging_data, job: job))
         set_retry_count(transaction, extension, job, default: resolve(default_retry_count))
 
-        scope.set_span(transaction)
         transaction
       end
 
