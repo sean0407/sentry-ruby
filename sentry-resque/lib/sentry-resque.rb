@@ -5,6 +5,7 @@ require "sentry-ruby"
 require "sentry/integrable"
 require "sentry/resque/configuration"
 require "sentry/resque/version"
+require "sentry/resque/job_extension"
 require "sentry/resque"
 
 module Sentry
@@ -13,14 +14,12 @@ module Sentry
 
     register_integration name: "resque", version: Sentry::Resque::VERSION
 
-    if defined?(::Rails::Railtie)
-      class Railtie < ::Rails::Railtie
-        config.after_initialize do
-          next unless Sentry.initialized? && defined?(::Sentry::Rails)
-
-          Sentry.configuration.rails.skippable_job_adapters << "ActiveJob::QueueAdapters::ResqueAdapter"
-        end
-      end
+    def self.job_extension
+      @job_extension ||= JobExtension.new
     end
+
+    Sentry.register_job_extension(job_extension)
   end
 end
+
+require "sentry/resque/railtie" if defined?(::Rails::Railtie)

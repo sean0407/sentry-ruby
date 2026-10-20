@@ -5,28 +5,47 @@ require "resque"
 module Sentry
   module Resque
     def perform
-      if Sentry.initialized?
+      if !Sentry.initialized?
+        super
+      elsif Sentry::Resque.job_extension.performed_by_active_job?(payload)
+        perform_with_active_job_hand_off { super }
+      else
         SentryReporter.record(queue, worker, payload) do
           super
         end
-      else
-        super
       end
+    end
+
+    private
+
+    def perform_with_active_job_hand_off
+      args = payload["args"]
+      begin
+        payload["args"] = Sentry::Resque.job_extension.active_job_args(queue: queue, worker: worker, payload: payload)
+        yield
+      ensure
+        payload["args"] = args
+      end
+    rescue Exception => exception
+      SentryReporter.capture_exception(queue, worker, payload, exception) unless Sentry.exception_captured?(exception)
+      raise
     end
 
     class SentryReporter
       SPAN_ORIGIN = "auto.queue.resque"
 
       class << self
+        def capture_exception(queue, worker, payload, exception)
+          Sentry.with_scope do |scope|
+            apply_job_scope(scope, queue, worker, payload)
+            ::Sentry::Resque.capture_exception(exception, hint: { background: false })
+          end
+        end
+
         def record(queue, worker, payload, &block)
           Sentry.with_scope do |scope|
             begin
-              contexts = generate_contexts(queue, worker, payload)
-              scope.set_contexts(**contexts)
-              scope.set_tags("resque.queue" => queue)
-
-              name = contexts.dig(:"Active-Job", :job_class) || contexts.dig(:"Resque", :job_class)
-              scope.set_transaction_name(name, source: :task)
+              apply_job_scope(scope, queue, worker, payload)
               transaction = Sentry.start_transaction(
                 name: scope.transaction_name,
                 source: scope.transaction_source,
@@ -86,6 +105,15 @@ module Sentry
         end
 
         private
+
+        def apply_job_scope(scope, queue, worker, payload)
+          contexts = generate_contexts(queue, worker, payload)
+          scope.set_contexts(**contexts)
+          scope.set_tags("resque.queue" => queue)
+
+          name = contexts.dig(:"Active-Job", :job_class) || contexts.dig(:"Resque", :job_class)
+          scope.set_transaction_name(name, source: :task)
+        end
 
         def raise_if_retries_remain(klass, exception)
           return unless Sentry.configuration.resque.report_after_job_retries &&
