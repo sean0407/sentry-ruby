@@ -123,7 +123,7 @@ module Sentry
               consumer.finish_transaction(transaction, 500)
 
               if backend_scope
-                scope.update_from_options(**default_extension.error_data(job: job, exception: e))
+                scope.update_from_options(**job_extensions.call(default_extension, :error_data, job: job, exception: e))
               elsif consumer.report_exception?(job, e)
                 capture_exception(job, e)
               end
@@ -133,7 +133,7 @@ module Sentry
           end
 
           def capture_exception(job, e)
-            consumer.capture_exception(job, e, **default_extension.error_data(job: job, exception: e))
+            consumer.capture_exception(job, e, **job_extensions.call(default_extension, :error_data, job: job, exception: e))
           end
 
           def register_event_handlers
